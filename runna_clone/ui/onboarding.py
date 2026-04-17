@@ -1,15 +1,15 @@
 import flet as ft
 from core.vdot_calc import calculate_vdot_from_race
-from database.db_manager import get_connection
+from database.db_manager import get_db
 import datetime
 
 class Onboarding(ft.Container):
     def __init__(self, page: ft.Page, on_complete):
         super().__init__()
-        self.page = page
+        self._page = page
         self.on_complete = on_complete
         self.padding = 40
-        self.alignment = ft.alignment.center
+        self.alignment = ft.Alignment(0, 0)
 
         # State variables
         self.ref_distance_dd = ft.Dropdown(
@@ -75,7 +75,7 @@ class Onboarding(ft.Container):
                 self.error_text,
                 ft.ElevatedButton(
                     "Generate My Plan",
-                    icon=ft.icons.DIRECTIONS_RUN,
+                    icon=ft.Icons.DIRECTIONS_RUN,
                     style=ft.ButtonStyle(
                         color=ft.Colors.WHITE,
                         bgcolor=ft.Colors.GREEN_600,
@@ -90,71 +90,93 @@ class Onboarding(ft.Container):
 
     def parse_time(self, time_str: str) -> int:
         """Parses MM:SS or HH:MM:SS to total seconds."""
-        parts = time_str.split(":")
+        parts = time_str.strip().split(":")
         if len(parts) == 2:
             return int(parts[0]) * 60 + int(parts[1])
         elif len(parts) == 3:
             return int(parts[0]) * 3600 + int(parts[1]) * 60 + int(parts[2])
         return 0
 
+    def show_error(self, message: str):
+        """Displays a user-friendly error message."""
+        self.error_text.value = message
+        self.error_text.visible = True
+        self._page.update()
+
     def submit_form(self, e):
         self.error_text.visible = False
-        self.page.update()
+        self._page.update()
+
+        # --- Validate Reference Time ---
+        ref_time_raw = self.ref_time_tf.value.strip()
+        if not ref_time_raw:
+            self.show_error("Please enter your recent race time (e.g., 22:30).")
+            return
 
         try:
-            # Parse Reference Fitness
-            ref_dist = 5000 if self.ref_distance_dd.value == "5k" else 10000
-            ref_time_sec = self.parse_time(self.ref_time_tf.value)
-            if ref_time_sec <= 0:
-                raise ValueError("Invalid reference time.")
+            ref_time_sec = self.parse_time(ref_time_raw)
+        except (ValueError, IndexError):
+            self.show_error("Invalid time format. Use MM:SS (e.g., 22:30).")
+            return
 
-            # Calculate VDOT
+        if ref_time_sec <= 0:
+            self.show_error("Race time must be greater than zero.")
+            return
+
+        # --- Validate Race Date ---
+        race_date_raw = self.race_date_tf.value.strip()
+        if not race_date_raw:
+            self.show_error("Please enter your race date (YYYY-MM-DD).")
+            return
+
+        try:
+            race_date = datetime.datetime.strptime(race_date_raw, "%Y-%m-%d").date()
+        except ValueError:
+            self.show_error("Invalid date format. Please use YYYY-MM-DD (e.g., 2024-10-15).")
+            return
+
+        if race_date <= datetime.date.today():
+            self.show_error("Race date must be in the future.")
+            return
+
+        # --- Validate Available Days ---
+        avail_days = [cb.data for cb in self.days_checks if cb.value]
+        if not avail_days:
+            self.show_error("Please select at least one running day.")
+            return
+
+        # --- All validations passed — calculate & save ---
+        try:
+            ref_dist = 5000 if self.ref_distance_dd.value == "5k" else 10000
             vdot = calculate_vdot_from_race(ref_dist, ref_time_sec)
 
-            # Goals
             goal_dist_km = float(self.goal_distance_dd.value)
-            goal_time_sec = self.parse_time(self.goal_time_tf.value) if self.goal_time_tf.value else 0
-
-            # Race Date
-            race_date = datetime.datetime.strptime(self.race_date_tf.value, "%Y-%m-%d").date()
-            if race_date <= datetime.date.today():
-                raise ValueError("Race date must be in the future.")
-
-            # Days
-            avail_days = [cb.data for cb in self.days_checks if cb.value]
-            if not avail_days:
-                raise ValueError("Please select at least one running day.")
-
-            # Save to Database
-            conn = get_connection()
-            cursor = conn.cursor()
+            goal_time_sec = self.parse_time(self.goal_time_tf.value) if self.goal_time_tf.value.strip() else 0
 
             days_str = ",".join(map(str, avail_days))
 
-            cursor.execute('''
-                INSERT INTO users (
-                    current_5k_time_sec, current_10k_time_sec, goal_distance_km, goal_time_sec, race_date, available_days, vdot
-                ) VALUES (?, ?, ?, ?, ?, ?, ?)
-            ''', (
-                ref_time_sec if ref_dist == 5000 else None,
-                ref_time_sec if ref_dist == 10000 else None,
-                goal_dist_km,
-                goal_time_sec,
-                self.race_date_tf.value,
-                days_str,
-                vdot
-            ))
-            user_id = cursor.lastrowid
+            with get_db() as conn:
+                cursor = conn.cursor()
 
-            # Init gamification for user
-            cursor.execute('INSERT INTO gamification (user_id) VALUES (?)', (user_id,))
+                cursor.execute('''
+                    INSERT INTO users (
+                        current_5k_time_sec, current_10k_time_sec, goal_distance_km, goal_time_sec, race_date, available_days, vdot
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                ''', (
+                    ref_time_sec if ref_dist == 5000 else None,
+                    ref_time_sec if ref_dist == 10000 else None,
+                    goal_dist_km,
+                    goal_time_sec,
+                    race_date_raw,
+                    days_str,
+                    vdot
+                ))
+                user_id = cursor.lastrowid
 
-            conn.commit()
-            conn.close()
+                # Init gamification for user
+                cursor.execute('INSERT INTO gamification (user_id) VALUES (?)', (user_id,))
 
             self.on_complete(user_id)
 
         except Exception as ex:
-            self.error_text.value = f"Error: {str(ex)}"
-            self.error_text.visible = True
-            self.page.update()
+            self.show_error(f"Something went wrong: {str(ex)}")

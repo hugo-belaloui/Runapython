@@ -18,7 +18,12 @@ def generate_plan(
     race_date = datetime.datetime.strptime(race_date_str, "%Y-%m-%d").date()
 
     days_to_race = (race_date - start_date).days
-    total_weeks = days_to_race // 7
+
+    if days_to_race <= 0:
+        return {"error": "Race date is too close."}
+
+    # Use ceil to include partial final week (so race day isn't dropped)
+    total_weeks = math.ceil(days_to_race / 7)
 
     if total_weeks <= 0:
         return {"error": "Race date is too close."}
@@ -85,6 +90,11 @@ def generate_plan(
 
         for day_idx in range(7):
             day_date = current_date + datetime.timedelta(days=(week-1)*7 + day_idx)
+
+            # Don't generate workouts past race day
+            if day_date > race_date:
+                continue
+
             day_of_week = day_date.weekday() # 0 = Monday, 6 = Sunday
 
             if day_of_week not in sorted_days:
@@ -148,17 +158,33 @@ def generate_plan(
                 "target_pace_sec_per_km": target_pace
             })
 
-    # Optional: ensure race day is in the plan
-    if race_date.weekday() in sorted_days:
-        # Override the last long run/quality run
-        for w in reversed(workouts):
-            if w['workout_date'] == race_date_str:
-                w['workout_type'] = "Race"
-                w['title'] = "Race Day!"
-                w['description'] = f"Go crush your {goal_distance_km}km goal!"
-                w['target_distance_km'] = goal_distance_km
-                w['target_pace_sec_per_km'] = paces.get('M', 0)
-                break
+    # Ensure race day is in the plan
+    race_day_workout = None
+    for w in workouts:
+        if w['workout_date'] == race_date_str:
+            race_day_workout = w
+            break
+
+    if race_day_workout:
+        # Override existing workout on race day
+        race_day_workout['workout_type'] = "Race"
+        race_day_workout['title'] = "Race Day!"
+        race_day_workout['description'] = f"Go crush your {goal_distance_km}km goal!"
+        race_day_workout['target_distance_km'] = goal_distance_km
+        race_day_workout['target_pace_sec_per_km'] = paces.get('M', 0)
+    else:
+        # Race day didn't get a workout (not an available day) — add it anyway
+        race_week = math.ceil((race_date - start_date).days / 7)
+        workouts.append({
+            "week_number": max(1, race_week),
+            "day_of_week": race_date.weekday(),
+            "workout_date": race_date_str,
+            "workout_type": "Race",
+            "title": "Race Day!",
+            "description": f"Go crush your {goal_distance_km}km goal!",
+            "target_distance_km": goal_distance_km,
+            "target_pace_sec_per_km": paces.get('M', 0)
+        })
 
     return {
         "user_id": user_id,

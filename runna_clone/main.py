@@ -1,13 +1,12 @@
 import flet as ft
-from database.db_manager import init_db, get_connection
+from database.db_manager import init_db, get_db
 from ui.onboarding import Onboarding
 from ui.dashboard import Dashboard
-from core.plan_engine import generate_plan
-import datetime
+from core.plan_service import create_plan_for_user
 
 def main(page: ft.Page):
     page.title = "Runna Clone"
-    page.theme_mode = ft.ThemeMode.LIGHT
+    page.theme_mode = ft.ThemeMode.SYSTEM
     page.horizontal_alignment = ft.CrossAxisAlignment.CENTER
     page.vertical_alignment = ft.MainAxisAlignment.START
     page.padding = 20
@@ -15,53 +14,23 @@ def main(page: ft.Page):
     init_db()
 
     def check_existing_user():
-        conn = get_connection()
-        cursor = conn.cursor()
-        cursor.execute("SELECT id FROM users ORDER BY created_at DESC LIMIT 1")
-        user = cursor.fetchone()
-        conn.close()
-        return user[0] if user else None
+        with get_db() as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT id FROM users ORDER BY created_at DESC LIMIT 1")
+            user = cursor.fetchone()
+            return user[0] if user else None
 
     def on_onboarding_complete(user_id):
-        # Fetch user data to generate plan
-        conn = get_connection()
-        cursor = conn.cursor()
-        cursor.execute("SELECT goal_distance_km, race_date, available_days, vdot FROM users WHERE id = ?", (user_id,))
-        user_data = cursor.fetchone()
+        plan = create_plan_for_user(user_id)
 
-        goal_distance_km, race_date_str, available_days_str, vdot = user_data
-        available_days = [int(x) for x in available_days_str.split(',')]
-
-        start_date_str = datetime.date.today().strftime("%Y-%m-%d")
-
-        plan = generate_plan(
-            user_id=user_id,
-            start_date_str=start_date_str,
-            race_date_str=race_date_str,
-            goal_distance_km=goal_distance_km,
-            vdot=vdot,
-            available_days=available_days
-        )
-
-        if "error" not in plan:
-            # Save plan to DB
-            cursor.execute('''
-                INSERT INTO training_plans (user_id, start_date, end_date, total_weeks, plan_type)
-                VALUES (?, ?, ?, ?, ?)
-            ''', (user_id, plan['start_date'], plan['end_date'], plan['total_weeks'], plan['plan_type']))
-
-            plan_id = cursor.lastrowid
-
-            # Save workouts
-            for w in plan['workouts']:
-                cursor.execute('''
-                    INSERT INTO workouts (plan_id, week_number, day_of_week, workout_date, workout_type, title, description, target_distance_km, target_pace_sec_per_km)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-                ''', (plan_id, w['week_number'], w['day_of_week'], w['workout_date'], w['workout_type'], w['title'], w['description'], w['target_distance_km'], w['target_pace_sec_per_km']))
-
-            conn.commit()
-
-        conn.close()
+        if plan.get("error"):
+            page.snack_bar = ft.SnackBar(
+                content=ft.Text(f"Could not generate plan: {plan['error']}"),
+                bgcolor=ft.Colors.RED_400
+            )
+            page.snack_bar.open = True
+            page.update()
+            return
 
         show_dashboard(user_id)
 
@@ -74,7 +43,7 @@ def main(page: ft.Page):
             center_title=True,
             bgcolor=ft.Colors.BLUE_700,
             actions=[
-                ft.IconButton(ft.icons.RESTART_ALT, on_click=lambda e: reset_app(), tooltip="Reset App Data")
+                ft.IconButton(ft.Icons.RESTART_ALT, on_click=lambda e: confirm_reset(), tooltip="Reset App Data")
             ]
         )
 
@@ -82,18 +51,40 @@ def main(page: ft.Page):
         page.add(dashboard_view.content)
         page.update()
 
-    def reset_app():
-        # Quick and dirty way to reset for testing
-        conn = get_connection()
-        c = conn.cursor()
-        c.execute("DELETE FROM workouts")
-        c.execute("DELETE FROM training_plans")
-        c.execute("DELETE FROM gamification")
-        c.execute("DELETE FROM users")
-        conn.commit()
-        conn.close()
-        page.appbar = None
-        show_onboarding()
+    def confirm_reset():
+        """Shows a confirmation dialog before wiping all data."""
+        def do_reset(e):
+            dialog.open = False
+            page.update()
+
+            with get_db() as conn:
+                c = conn.cursor()
+                c.execute("DELETE FROM workouts")
+                c.execute("DELETE FROM training_plans")
+                c.execute("DELETE FROM gamification")
+                c.execute("DELETE FROM users")
+
+            page.appbar = None
+            show_onboarding()
+
+        def cancel(e):
+            dialog.open = False
+            page.update()
+
+        dialog = ft.AlertDialog(
+            modal=True,
+            title=ft.Text("Reset All Data?"),
+            content=ft.Text("This will permanently delete all your training data. This cannot be undone."),
+            actions=[
+                ft.TextButton("Cancel", on_click=cancel),
+                ft.TextButton("Reset", on_click=do_reset, style=ft.ButtonStyle(color=ft.Colors.RED)),
+            ],
+            actions_alignment=ft.MainAxisAlignment.END,
+        )
+
+        page.dialog = dialog
+        dialog.open = True
+        page.update()
 
     def show_onboarding():
         page.controls.clear()
@@ -109,4 +100,4 @@ def main(page: ft.Page):
         show_onboarding()
 
 if __name__ == "__main__":
-    ft.app(main)
+    ft.run(main)
