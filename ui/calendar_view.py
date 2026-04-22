@@ -554,12 +554,12 @@ class CalendarView(QWidget):
             db = get_database()
             if session.id:
                 db.update_session_status(session.id, dlg.new_status)
-                # Refresh cache via full plan reload from DB internally to main_window
-                # so other views update too
-                
-                # To be clean, emit an event upwards, but here we can just reload the full plan
-                # which keeps the pattern
-                if self.current_plan:
-                    updated_plan = db.get_plan_by_id(self.current_plan.id)
-                    if updated_plan:
-                        self.set_plan(updated_plan)
+                # Update local session object
+                session.status = dlg.new_status
+                # Refresh only this view's current display
+                self._refresh()
+                # Notify parent to refresh dashboard if needed (minimal reload)
+                if hasattr(self.parent(), "dashboard_view"):
+                    self.parent().dashboard_view._refresh()
+                elif hasattr(self.window(), "dashboard_view"):
+                    self.window().dashboard_view._refresh()

@@ -68,6 +68,9 @@ class Database:
                 vdot            REAL    NOT NULL,
                 current_weekly_km REAL  NOT NULL,
                 days_per_week   INTEGER NOT NULL,
+                recent_race_distance TEXT DEFAULT '5K',
+                recent_race_time_seconds INTEGER DEFAULT 0,
+                long_run_day    INTEGER DEFAULT 6,
                 created_at      TEXT    NOT NULL DEFAULT (datetime('now'))
             );
 
@@ -98,30 +101,42 @@ class Database:
             CREATE INDEX IF NOT EXISTS idx_sessions_date ON sessions(date);
             CREATE INDEX IF NOT EXISTS idx_pace_zones_plan_id ON pace_zones(plan_id);
         """)
-        # Migrate: add phase column if missing (for existing databases)
-        self._migrate_add_phase_column()
+        # Migrate: add missing columns
+        self._migrate_schema()
 
-    def _migrate_add_phase_column(self) -> None:
-        """Add 'phase' column to sessions table if it doesn't exist."""
+    def _migrate_schema(self) -> None:
+        """Add missing columns to tables if they don't exist."""
         assert self.conn is not None
         try:
+            # sessions: phase
             cols = self.conn.execute("PRAGMA table_info(sessions)").fetchall()
             col_names = [c["name"] for c in cols]
             if "phase" not in col_names:
                 self.conn.execute(
                     "ALTER TABLE sessions ADD COLUMN phase TEXT NOT NULL DEFAULT 'Base'"
                 )
-                self.conn.commit()
-            # Migrate: add description to pace_zones if missing
+            
+            # pace_zones: description
             cols = self.conn.execute("PRAGMA table_info(pace_zones)").fetchall()
             col_names = [c["name"] for c in cols]
             if "description" not in col_names:
                 self.conn.execute(
                     "ALTER TABLE pace_zones ADD COLUMN description TEXT DEFAULT ''"
                 )
-                self.conn.commit()
+            
+            # plans: input tracking
+            cols = self.conn.execute("PRAGMA table_info(plans)").fetchall()
+            col_names = [c["name"] for c in cols]
+            if "recent_race_distance" not in col_names:
+                self.conn.execute("ALTER TABLE plans ADD COLUMN recent_race_distance TEXT DEFAULT '5K'")
+            if "recent_race_time_seconds" not in col_names:
+                self.conn.execute("ALTER TABLE plans ADD COLUMN recent_race_time_seconds INTEGER DEFAULT 0")
+            if "long_run_day" not in col_names:
+                self.conn.execute("ALTER TABLE plans ADD COLUMN long_run_day INTEGER DEFAULT 6")
+                
+            self.conn.commit()
         except Exception:
-            pass  # Ignore migration errors on fresh DBs
+            pass
 
     # ------------------------------------------------------------------
     # Plan CRUD
@@ -136,8 +151,10 @@ class Database:
         try:
             cur.execute("""
                 INSERT INTO plans (name, race_distance, race_date, vdot,
-                                   current_weekly_km, days_per_week)
-                VALUES (?, ?, ?, ?, ?, ?)
+                                   current_weekly_km, days_per_week,
+                                   recent_race_distance, recent_race_time_seconds,
+                                   long_run_day)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, (
                 plan.name,
                 plan.race_distance,
@@ -145,6 +162,9 @@ class Database:
                 plan.vdot,
                 plan.current_weekly_km,
                 plan.days_per_week,
+                plan.recent_race_distance,
+                plan.recent_race_time_seconds,
+                plan.long_run_day,
             ))
             plan_id = cur.lastrowid
 
@@ -294,6 +314,9 @@ class Database:
             vdot=plan_data["vdot"],
             current_weekly_km=plan_data["current_weekly_km"],
             days_per_week=plan_data["days_per_week"],
+            recent_race_distance=plan_data.get("recent_race_distance", "5K"),
+            recent_race_time_seconds=plan_data.get("recent_race_time_seconds", 0),
+            long_run_day=plan_data.get("long_run_day", 6),
             pace_zones=pace_zones,
             weeks=weeks,
         )
@@ -303,6 +326,39 @@ class Database:
         assert self.conn is not None
         self.conn.execute("DELETE FROM plans WHERE id = ?", (plan_id,))
         self.conn.commit()
+
+    def sync_plan(self, old_plan_id: int, new_plan: FullPlan) -> int:
+        """
+        Regenerate a plan while preserving status and notes for matching dates.
+        Returns the new (or updated) plan_id.
+        """
+        old_plan = self.get_plan_by_id(old_plan_id)
+        if not old_plan:
+            return self.save_plan(new_plan)
+
+        # Map old sessions by date for lookup
+        old_sessions = {}
+        for week in old_plan.weeks:
+            for s in week.sessions:
+                old_sessions[s.date] = s
+
+        # Apply old status/notes to new sessions if dates match
+        for week in new_plan.weeks:
+            for s in week.sessions:
+                if s.date in old_sessions:
+                    old_s = old_sessions[s.date]
+                    # Only preserve if types are somewhat compatible or it's a status change
+                    s.status = old_s.status
+                    if old_s.notes and not s.notes:
+                        s.notes = old_s.notes
+                    elif old_s.notes and s.notes:
+                        # Append old notes if they are different
+                        if old_s.notes not in s.notes:
+                            s.notes = f"{s.notes} | Prev: {old_s.notes}"
+
+        # Delete old and save new (simplest implementation of sync)
+        self.delete_plan(old_plan_id)
+        return self.save_plan(new_plan)
 
     def duplicate_plan(self, plan_id: int) -> Optional[int]:
         """Duplicate a plan with all sessions. Returns new plan_id."""

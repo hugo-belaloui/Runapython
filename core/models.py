@@ -130,6 +130,11 @@ class FullPlan:
     pace_zones: list[PaceZone]
     weeks: list[WeekPlan]
     id: Optional[int] = None
+    
+    # Store initial inputs for easy regeneration
+    recent_race_distance: str = "5K"
+    recent_race_time_seconds: int = 0
+    long_run_day: int = 6  # Sunday
 
     @property
     def total_sessions(self) -> int:
@@ -156,3 +161,15 @@ class FullPlan:
         """Return the current week number."""
         cw = self.get_current_week()
         return cw.week_number if cw else 0
+        
+    def to_inputs(self) -> PlanInputs:
+        """Convert plan back to inputs for regeneration."""
+        return PlanInputs(
+            race_distance=self.race_distance,
+            race_date=self.race_date,
+            current_weekly_km=self.current_weekly_km,
+            recent_race_distance=self.recent_race_distance,
+            recent_race_time_seconds=self.recent_race_time_seconds,
+            days_per_week=self.days_per_week,
+            long_run_day=self.long_run_day,
+        )

@@ -224,14 +224,17 @@ class WelcomeDialog(QDialog):
 class PlanGenerationDialog(QDialog):
     """Full plan creation wizard — collects PlanInputs, shows preview, saves."""
 
-    def __init__(self, parent=None):
+    def __init__(self, parent=None, initial_inputs: PlanInputs | None = None):
         super().__init__(parent)
         self.setWindowTitle("Generate Training Plan")
         self.setMinimumSize(520, 680)
         self.setStyleSheet(DIALOG_STYLE)
         self.generated_plan: FullPlan | None = None
+        self.initial_inputs = initial_inputs
 
         self._build_ui()
+        if self.initial_inputs:
+            self._fill_initial_values()
 
     def _build_ui(self):
         layout = QVBoxLayout(self)
@@ -367,6 +370,25 @@ class PlanGenerationDialog(QDialog):
 
         layout.addStretch()
         layout.addLayout(btn_layout)
+
+    def _fill_initial_values(self):
+        if not self.initial_inputs:
+            return
+        ii = self.initial_inputs
+        self.race_distance_combo.setCurrentText(ii.race_distance)
+        self.race_date_edit.setDate(ii.race_date)
+        self.weekly_km_spin.setValue(ii.current_weekly_km)
+        self.recent_race_combo.setCurrentText(ii.recent_race_distance)
+        
+        h = ii.recent_race_time_seconds // 3600
+        m = (ii.recent_race_time_seconds % 3600) // 60
+        s = ii.recent_race_time_seconds % 60
+        self.hours_spin.setValue(h)
+        self.mins_spin.setValue(m)
+        self.secs_spin.setValue(s)
+        
+        self.days_spin.setValue(ii.days_per_week)
+        self.long_run_combo.setCurrentIndex(ii.long_run_day)
 
     def _get_race_time_seconds(self) -> int:
         return (self.hours_spin.value() * 3600

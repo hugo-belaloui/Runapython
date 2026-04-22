@@ -87,7 +87,8 @@ def _time_from_vdot_and_distance(vdot: float, distance_m: float, time_guess: flo
     numerically via Newton-Raphson with finite-difference derivative.
     """
     t = time_guess
-    for _ in range(200):
+    max_iter = 200
+    for i in range(max_iter):
         v = distance_m / t
         vo2 = _vo2_from_velocity(v)
         pct = _percent_vo2max(t)
@@ -107,9 +108,13 @@ def _time_from_vdot_and_distance(vdot: float, distance_m: float, time_guess: flo
         t_new = t - f_val / df
         if t_new < 1.0:
             t_new = 1.0  # clamp to sensible minimum
+        
+        # Convergence check
         if abs(t_new - t) < 1e-6:
-            break
+            return t_new
         t = t_new
+    
+    # Fallback if no convergence: return the last best estimate
     return t
 
 
@@ -120,9 +125,11 @@ def vdot_to_race_prediction(vdot: float, distance_m: float) -> float:
     Uses Newton's method starting from a reasonable initial guess
     based on an assumed average pace.
     """
-    # Initial guess: assume ~250 m/min pace
-    initial_guess = distance_m / 250.0
-    return _time_from_vdot_and_distance(vdot, distance_m, initial_guess)
+    # Initial guess: assume ~200 m/min pace (5:00/km)
+    initial_guess = distance_m / 200.0
+    # Safety clamp VDOT to avoid numerical issues
+    safe_vdot = max(10.0, min(vdot, 90.0))
+    return _time_from_vdot_and_distance(safe_vdot, distance_m, initial_guess)
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -398,38 +405,40 @@ def assign_sessions(
 
     # Calculate km per workout type based on phase ratios
     long_run_cap = LONG_RUN_CAPS.get(race_distance, 20.0)
+    # Safety: Long run should generally not exceed 35% of weekly volume
+    # (except for very low volume plans where it's hard to avoid)
+    max_long_proportion = 0.35 if weekly_km > 30 else 0.50
 
     if phase == "Base":
         long_km = min(weekly_km * 0.28, long_run_cap)
         tempo_km = 0.0
         interval_km = 0.0
-        easy_km = weekly_km - long_km
     elif phase == "Build 1":
         long_km = min(weekly_km * 0.25, long_run_cap)
         tempo_km = weekly_km * 0.10
         interval_km = 0.0
-        easy_km = weekly_km - long_km - tempo_km
     elif phase == "Build 2":
         long_km = min(weekly_km * 0.22, long_run_cap)
         tempo_km = weekly_km * 0.10
         interval_km = weekly_km * 0.10
-        easy_km = weekly_km - long_km - tempo_km - interval_km
     elif phase == "Taper":
         long_km = min(weekly_km * 0.20, long_run_cap * 0.7)
         tempo_km = weekly_km * 0.08
         interval_km = 0.0
-        easy_km = weekly_km - long_km - tempo_km
     elif phase == "Race Week":
-        # Minimal easy running + race day
         long_km = 0.0
         tempo_km = 0.0
         interval_km = 0.0
-        easy_km = weekly_km
     else:
         long_km = min(weekly_km * 0.25, long_run_cap)
         tempo_km = 0.0
         interval_km = 0.0
-        easy_km = weekly_km - long_km
+
+    # Apply safety proportion check
+    long_km = min(long_km, weekly_km * max_long_proportion)
+    
+    # Calculate remaining km for easy runs
+    easy_km = weekly_km - long_km - tempo_km - interval_km
 
     # Clamp all values
     long_km = round(max(long_km, 0), 1)
@@ -467,6 +476,11 @@ def assign_sessions(
         # Tempo workout: warmup + tempo + cooldown
         warmup_cooldown = 3.0  # 1.5km warmup + 1.5km cooldown
         tempo_distance = tempo_km + warmup_cooldown
+        # Safety: individual session shouldn't exceed 40% of weekly total
+        if tempo_distance > weekly_km * 0.4 and weekly_km > 20:
+             tempo_distance = weekly_km * 0.4
+             tempo_km = tempo_distance - warmup_cooldown
+
         assigned_types[tempo_day] = "Tempo"
         assigned_km[tempo_day] = round(tempo_distance, 1)
         assigned_pace[tempo_day] = tempo_pace
@@ -486,6 +500,12 @@ def assign_sessions(
         num_reps = max(3, int(interval_km / 1.0))  # 1km repeats
         rep_distance = 1.0
         total_interval_dist = num_reps * rep_distance + warmup_cooldown
+        
+        # Safety clamp
+        if total_interval_dist > weekly_km * 0.4 and weekly_km > 20:
+            total_interval_dist = weekly_km * 0.4
+            num_reps = max(1, int((total_interval_dist - warmup_cooldown) / 1.0))
+
         assigned_types[interval_day] = "Intervals"
         assigned_km[interval_day] = round(total_interval_dist, 1)
         assigned_pace[interval_day] = interval_pace
@@ -497,6 +517,10 @@ def assign_sessions(
         remaining_days = [d for d in remaining_days if d != interval_day]
 
     # Easy runs on remaining available days
+    # Recalculate easy_km based on what was actually assigned to quality sessions
+    quality_km = sum(assigned_km.values())
+    easy_km = max(0, weekly_km - quality_km)
+
     if easy_km > 0 and remaining_days:
         easy_splits = _distribute_easy_km(easy_km, len(remaining_days))
         for day, km in zip(remaining_days, easy_splits):

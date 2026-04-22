@@ -123,10 +123,11 @@ class PlanBuilderView(QWidget):
         # Action buttons
         action_bar = QWidget()
         action_bar.setStyleSheet("background: #1A1A2E;")
-        action_layout = QHBoxLayout(action_bar)
+        action_layout = QVBoxLayout(action_bar)
         action_layout.setContentsMargins(12, 8, 12, 12)
         action_layout.setSpacing(8)
-
+        
+        row1 = QHBoxLayout()
         dup_btn = QPushButton("📋 Duplicate")
         dup_btn.setStyleSheet("""
             QPushButton {
@@ -140,7 +141,7 @@ class PlanBuilderView(QWidget):
             QPushButton:hover { background: #3A3A58; }
         """)
         dup_btn.clicked.connect(self._on_duplicate)
-        action_layout.addWidget(dup_btn)
+        row1.addWidget(dup_btn)
 
         del_btn = QPushButton("🗑 Delete")
         del_btn.setStyleSheet("""
@@ -155,7 +156,24 @@ class PlanBuilderView(QWidget):
             QPushButton:hover { background: #3A3A58; }
         """)
         del_btn.clicked.connect(self._on_delete)
-        action_layout.addWidget(del_btn)
+        row1.addWidget(del_btn)
+        action_layout.addLayout(row1)
+
+        self.regen_btn = QPushButton("🔄  Adjust / Regenerate Plan")
+        self.regen_btn.setStyleSheet("""
+            QPushButton {
+                background: #2A2A48;
+                color: #6C63FF;
+                border: 1px solid #6C63FF;
+                border-radius: 6px;
+                padding: 8px 12px;
+                font-size: 12px;
+                font-weight: 600;
+            }
+            QPushButton:hover { background: #6C63FF; color: white; }
+        """)
+        self.regen_btn.clicked.connect(self._on_regenerate)
+        action_layout.addWidget(self.regen_btn)
 
         left_layout.addWidget(action_bar)
 
@@ -461,6 +479,32 @@ class PlanBuilderView(QWidget):
             self._refresh_plan_list()
             self._show_empty_state()
             self.plan_deleted.emit() # Notify parent so it unloads
+
+    def _on_regenerate(self):
+        if not self.current_plan or not self.current_plan.id:
+            QMessageBox.information(self, "No Plan", "Select a plan to regenerate.")
+            return
+        
+        # Prepare initial inputs from current plan
+        initial_inputs = self.current_plan.to_inputs()
+        
+        dlg = PlanGenerationDialog(self, initial_inputs=initial_inputs)
+        dlg.setWindowTitle("Adjust / Regenerate Plan")
+        
+        if dlg.exec() and dlg.generated_plan:
+            db = get_database()
+            # Use sync_plan to preserve status/notes
+            new_id = db.sync_plan(self.current_plan.id, dlg.generated_plan)
+            
+            self._refresh_plan_list()
+            # Select the regenerated plan
+            for i in range(self.plan_list.count()):
+                item = self.plan_list.item(i)
+                if item.data(Qt.ItemDataRole.UserRole) == new_id:
+                    self.plan_list.setCurrentRow(i)
+                    break
+            self.plan_selected.emit(new_id)
+            QMessageBox.information(self, "Success", "Plan regenerated. Existing session progress was preserved where possible.")
 
     def refresh(self):
         """Public refresh method."""
